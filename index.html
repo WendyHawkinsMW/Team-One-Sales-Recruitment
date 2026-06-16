@@ -2238,155 +2238,149 @@
 </footer>
 
 <script>
-// ── JSONBIN PERSISTENCE ──────────────────────────────────────────────
-const BIN_KEY  = '$2a$10$alz381/3EJKP1GpiDzSVje4TZlzdwcNzUirYGPUnGRIGY1cK/4YUa';
-const BIN_URL  = 'https://api.jsonbin.io/v3/b';
-let   BIN_ID   = null;   // will be set on first load or create
-let   saveTimer = null;
-let   isSaving  = false;
+// ── PERSISTENCE: JSONBin ─────────────────────────────────────────────
+const API_KEY = '$2a$10$alz381/3EJKP1GpiDzSVje4TZlzdwcNzUirYGPUnGRIGY1cK/4YUa';
+const API_URL = 'https://api.jsonbin.io/v3/b';
 
-// Show a small status indicator in the header
-function setStatus(msg, colour) {
-  let el = document.getElementById('save-status');
-  if (!el) return;
-  el.textContent = msg;
-  el.style.color = colour || 'rgba(255,255,255,0.6)';
+// IMPORTANT: BIN_ID gets set permanently after first save.
+// Once set, paste the ID you see in the status bar into the BIN_ID line below
+// and re-upload to GitHub so all users share the same bin.
+let BIN_ID = null; // e.g. '6675abc123def456' — paste your ID here after first save
+
+let saveTimer = null;
+let saving = false;
+
+function setStatus(msg, col) {
+  const el = document.getElementById('save-status');
+  if (el) { el.textContent = msg; el.style.color = col || 'rgba(255,255,255,0.5)'; }
 }
 
-// Collect the editable state of every row across all offices
+function getHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'X-Master-Key': API_KEY,
+    'X-Access-Key': API_KEY
+  };
+}
+
+// Collect rating, action, note for every agent row
 function collectState() {
   const state = {};
   ['armadale','hawthorn','brighton','albertpark','balwyn'].forEach(office => {
-    state[office] = [];
+    state[office] = {};
     document.querySelectorAll('#table-' + office + ' tbody tr').forEach(tr => {
       const cells = tr.querySelectorAll('td');
       if (!cells.length) return;
+      const name   = cells[0]?.textContent?.trim();
+      if (!name) return;
       const rating = cells[6]?.querySelector('select')?.value || '';
       const action = cells[7]?.querySelector('select')?.value || '';
       const note   = cells[8]?.querySelector('.editable')?.innerText?.trim() || '';
-      const name   = cells[0]?.textContent?.trim() || '';
-      if (name) state[office].push({ name, rating, action, note });
+      if (rating || action || note) {
+        state[office][name] = { rating, action, note };
+      }
     });
   });
   return state;
 }
 
-// Apply saved state back onto the table rows
+// Apply saved state back onto rows
 function applyState(state) {
   if (!state) return;
   ['armadale','hawthorn','brighton','albertpark','balwyn'].forEach(office => {
-    const saved = state[office];
-    if (!saved) return;
-    const lookup = {};
-    saved.forEach(r => { lookup[r.name] = r; });
+    const officeData = state[office];
+    if (!officeData) return;
     document.querySelectorAll('#table-' + office + ' tbody tr').forEach(tr => {
       const cells = tr.querySelectorAll('td');
       if (!cells.length) return;
       const name = cells[0]?.textContent?.trim();
-      const data = lookup[name];
-      if (!data) return;
+      const d = officeData[name];
+      if (!d) return;
       const ratingSel = cells[6]?.querySelector('select');
       const actionSel = cells[7]?.querySelector('select');
       const noteDiv   = cells[8]?.querySelector('.editable');
-      if (ratingSel && data.rating) ratingSel.value = data.rating;
-      if (actionSel && data.action) {
-        actionSel.value = data.action;
-        actionSel.dataset.val = data.action;
+      if (ratingSel && d.rating) ratingSel.value = d.rating;
+      if (actionSel && d.action) {
+        actionSel.value = d.action;
+        actionSel.dataset.val = d.action;
       }
-      if (noteDiv && data.note) noteDiv.innerText = data.note;
+      if (noteDiv && d.note) noteDiv.innerText = d.note;
     });
   });
 }
 
-// Load saved state from JSONBin
+async function saveState() {
+  if (saving) return;
+  saving = true;
+  setStatus('Saving…', '#fcd34d');
+  const state = collectState();
+  try {
+    let res;
+    if (!BIN_ID) {
+      // First ever save — create a new bin
+      res = await fetch(API_URL, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ mwdata: state })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(json));
+      BIN_ID = json.metadata?.id;
+      // Show the ID prominently so Wendy can hardcode it
+      setStatus('✓ Saved — BIN ID: ' + BIN_ID + ' (see instructions)', '#86efac');
+      // Also store locally as fallback
+      if (BIN_ID) localStorage.setItem('mw_recruitment_bin', BIN_ID);
+      alert('First save complete!\n\nYour data bin ID is:\n' + BIN_ID + '\n\nPlease send this to Claude so it can be hardcoded into the file for all users.');
+    } else {
+      // Update existing bin
+      res = await fetch(API_URL + '/' + BIN_ID, {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify({ mwdata: state })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(json));
+      setStatus('✓ Saved  ' + new Date().toLocaleTimeString(), '#86efac');
+      setTimeout(() => setStatus('Ready', 'rgba(255,255,255,0.45)'), 3000);
+    }
+  } catch(e) {
+    console.error('Save error:', e);
+    setStatus('⚠ Save failed', '#fca5a5');
+  }
+  saving = false;
+}
+
 async function loadState() {
-  setStatus('Loading…', 'rgba(255,255,255,0.5)');
-  // Check localStorage for bin ID
-  BIN_ID = localStorage.getItem('mw_bin_id');
-  if (!BIN_ID) {
-    setStatus('No saved data yet', 'rgba(255,255,255,0.4)');
+  // Try hardcoded BIN_ID first, then localStorage fallback
+  const id = BIN_ID || localStorage.getItem('mw_recruitment_bin');
+  if (!id) {
+    setStatus('Ready — make a change to save', 'rgba(255,255,255,0.4)');
     return;
   }
+  BIN_ID = id;
+  setStatus('Loading saved data…', 'rgba(255,255,255,0.5)');
   try {
-    const res = await fetch(BIN_URL + '/' + BIN_ID + '/latest', {
-      headers: { 'X-Master-Key': BIN_KEY }
+    const res = await fetch(API_URL + '/' + BIN_ID + '/latest', {
+      headers: getHeaders()
     });
-    if (!res.ok) throw new Error('Load failed');
     const json = await res.json();
-    applyState(json.record);
+    if (!res.ok) throw new Error(JSON.stringify(json));
+    applyState(json.record?.mwdata);
     setStatus('✓ Loaded', '#86efac');
-    setTimeout(() => setStatus('Auto-saving changes', 'rgba(255,255,255,0.4)'), 2000);
+    setTimeout(() => setStatus('Ready', 'rgba(255,255,255,0.45)'), 2000);
   } catch(e) {
+    console.error('Load error:', e);
     setStatus('Could not load saved data', '#fca5a5');
   }
 }
 
-// Save current state to JSONBin
-async function saveState() {
-  if (isSaving) return;
-  isSaving = true;
-  setStatus('Saving…', '#fcd34d');
-  const state = collectState();
-  try {
-    let res, json;
-    if (!BIN_ID) {
-      // Create a new bin
-      res = await fetch(BIN_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Master-Key': BIN_KEY,
-          'X-Bin-Name': 'MW-Recruitment-2026',
-          'X-Bin-Private': 'true'
-        },
-        body: JSON.stringify(state)
-      });
-      json = await res.json();
-      BIN_ID = json.metadata?.id;
-      if (BIN_ID) localStorage.setItem('mw_bin_id', BIN_ID);
-    } else {
-      // Update existing bin
-      res = await fetch(BIN_URL + '/' + BIN_ID, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Master-Key': BIN_KEY
-        },
-        body: JSON.stringify(state)
-      });
-      json = await res.json();
-    }
-    if (!res.ok) throw new Error('Save failed');
-    setStatus('✓ Saved', '#86efac');
-    setTimeout(() => setStatus('Auto-saving changes', 'rgba(255,255,255,0.4)'), 2000);
-  } catch(e) {
-    setStatus('⚠ Save failed — check connection', '#fca5a5');
-  }
-  isSaving = false;
-}
-
-// Debounce saves — wait 1.5s after last change before saving
 function scheduleSave() {
+  setStatus('Unsaved changes…', '#fcd34d');
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveState, 1500);
 }
 
-// ── SHARE BIN ID ─────────────────────────────────────────────────────
-// So other users load the same data, store BIN_ID in the URL hash
-function syncBinId() {
-  if (BIN_ID && !window.location.hash.includes(BIN_ID)) {
-    history.replaceState(null, '', '#bin=' + BIN_ID);
-  }
-}
-function readBinIdFromUrl() {
-  const m = window.location.hash.match(/bin=([a-f0-9]+)/);
-  if (m) {
-    BIN_ID = m[1];
-    localStorage.setItem('mw_bin_id', BIN_ID);
-  }
-}
-
-// ── CORE FUNCTIONS ───────────────────────────────────────────────────
+// ── UI FUNCTIONS ─────────────────────────────────────────────────────
 function switchTab(id, btn) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -2397,8 +2391,7 @@ function switchTab(id, btn) {
 function deleteRow(btn) {
   if (!confirm('Remove this agent?')) return;
   btn.closest('tr').remove();
-  const table = btn.closest('table');
-  updateCount(table);
+  updateCount(btn.closest('table'));
   scheduleSave();
 }
 
@@ -2467,7 +2460,7 @@ function addAgent() {
   const agency    = document.getElementById('modal-agency').value.trim();
   const phone     = document.getElementById('modal-phone').value.trim();
   const price     = document.getElementById('modal-price').value.trim() || '—';
-  const sales     = document.getElementById('modal-sales').value.trim() || '—';
+  const sales     = document.getElementById('modal-sales')?.value.trim() || '—';
   const market    = document.getElementById('modal-market').value.trim() || 'House & Apt';
   const rationale = document.getElementById('modal-rationale').value.trim();
 
@@ -2480,15 +2473,14 @@ function addAgent() {
     <td class="price-cell">${esc(price)}</td>
     <td class="sales-cell">${esc(sales)}</td>
     <td>${esc(market)}</td>
-    <td><select class="rating-select" onchange="scheduleSave()"><option>—</option><option>1 Cold</option><option>2</option><option>3</option><option>4</option><option>5 Warm</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10 Hot</option></select></td>
-    <td class="action-cell"><select class="action-select" onchange="updateActionStyle(this);scheduleSave()"><option value="">— Select —</option><option value="pursue">✅ Pursue</option><option value="hold">⏸ Hold</option><option value="pass">✗ Pass</option></select></td>
+    <td><select class="rating-select"><option>—</option><option>1 Cold</option><option>2</option><option>3</option><option>4</option><option>5 Warm</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10 Hot</option></select></td>
+    <td class="action-cell"><select class="action-select"><option value="">— Select —</option><option value="pursue">✅ Pursue</option><option value="hold">⏸ Hold</option><option value="pass">✗ Pass</option></select></td>
     <td><div class="editable" contenteditable="true"></div></td>
     <td class="rationale-cell">${esc(rationale)}</td>
     <td><button class="del-btn" onclick="deleteRow(this)" title="Remove">×</button></td>
   `;
   tbody.appendChild(tr);
-  // wire note saving
-  tr.querySelector('.editable').addEventListener('input', scheduleSave);
+  wireRow(tr);
   updateCount(document.getElementById('table-' + office));
   closeModal();
   scheduleSave();
@@ -2525,39 +2517,23 @@ function updateActionStyle(sel) {
   sel.dataset.val = sel.value;
 }
 
+function wireRow(tr) {
+  tr.querySelectorAll('.rating-select').forEach(s => s.addEventListener('change', scheduleSave));
+  tr.querySelectorAll('.action-select').forEach(s => s.addEventListener('change', function() {
+    updateActionStyle(this); scheduleSave();
+  }));
+  tr.querySelectorAll('.editable').forEach(d => d.addEventListener('input', scheduleSave));
+}
+
 // ── INIT ─────────────────────────────────────────────────────────────
 ['armadale','hawthorn','brighton','albertpark','balwyn'].forEach(o => {
   const t = document.getElementById('table-' + o);
-  if (t) updateCount(t);
+  if (t) { updateCount(t); t.querySelectorAll('tbody tr').forEach(wireRow); }
 });
 
-// Wire rating selects
-document.querySelectorAll('.rating-select').forEach(sel => {
-  sel.addEventListener('change', scheduleSave);
-});
-
-// Wire action selects
-document.querySelectorAll('.action-select').forEach(sel => {
-  sel.addEventListener('change', function() {
-    updateActionStyle(this);
-    scheduleSave();
-  });
-});
-
-// Wire note divs
-document.querySelectorAll('.editable').forEach(div => {
-  div.addEventListener('input', scheduleSave);
-});
-
-// Keyboard
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
-// Load saved state on startup
-window.addEventListener('load', async () => {
-  readBinIdFromUrl();
-  await loadState();
-  syncBinId();
-});
+window.addEventListener('load', loadState);
 </script>
 </body>
 </html>
